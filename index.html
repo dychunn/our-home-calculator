@@ -21,6 +21,15 @@
     .badge{white-space:nowrap;background:var(--accent-soft);color:var(--accent);padding:9px 12px;border-radius:999px;font-size:13px;font-weight:700}
     .badge.offline{background:#fff0e7;color:var(--warn)}
     .badge.error{background:#fdecec;color:var(--danger)}
+    .header-actions{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+    .logout-btn{display:none;background:#fff;font-size:12px;padding:8px 11px}
+    .login-overlay{position:fixed;inset:0;z-index:9999;background:rgba(23,23,20,.72);display:flex;align-items:center;justify-content:center;padding:20px;backdrop-filter:blur(7px)}
+    .login-box{width:min(420px,100%);background:#fff;border-radius:24px;padding:30px;text-align:center;box-shadow:0 24px 80px rgba(0,0,0,.25)}
+    .login-box h2{margin:0 0 10px;font-size:27px;letter-spacing:-.04em}
+    .login-box p{margin:0 0 21px;color:var(--muted);font-size:14px;line-height:1.65}
+    .google-login{width:100%;border-radius:13px;padding:13px;background:var(--accent);border-color:var(--accent);color:#fff;font-size:15px}
+    .google-login:hover{background:var(--hero);color:#fff}
+    .login-message{min-height:20px;margin-top:13px!important;color:var(--danger)!important;font-size:12px!important}
     .layout{display:grid;grid-template-columns:minmax(0,1fr) minmax(360px,.9fr);gap:18px;align-items:start}
     .card{background:var(--card);border:1px solid var(--line);border-radius:22px;padding:22px;box-shadow:0 8px 30px rgba(30,28,22,.04)}
     .section-title{font-size:18px;margin:0 0 17px}
@@ -86,7 +95,10 @@
         <h1>우리집 계산기</h1>
         <p class="subtitle">둘의 소득과 대출 조건을 넣으면<br>DSR과 실제로 쓸 수 있는 생활비가 바로 계산됩니다.</p>
       </div>
-      <div class="badge offline" id="saveStatus">이 기기에 저장됨</div>
+      <div class="header-actions">
+        <div class="badge offline" id="saveStatus">로그인 확인 중</div>
+        <button type="button" class="logout-btn" id="logoutBtn">로그아웃</button>
+      </div>
     </header>
 
     <div class="layout">
@@ -347,6 +359,15 @@
     </footer>
   </main>
 
+  <div class="login-overlay" id="loginOverlay">
+    <div class="login-box">
+      <h2>우리집 계산기</h2>
+      <p>허용된 두 사람만 계산기와 저장된 값을<br>확인하고 수정할 수 있습니다.</p>
+      <button type="button" class="google-login" id="googleLoginBtn">Google 계정으로 로그인</button>
+      <p class="login-message" id="loginMessage"></p>
+    </div>
+  </div>
+
 <script src="https://www.gstatic.com/firebasejs/12.7.0/firebase-app-compat.js"></script>
 <script src="https://www.gstatic.com/firebasejs/12.7.0/firebase-auth-compat.js"></script>
 <script src="https://www.gstatic.com/firebasejs/12.7.0/firebase-database-compat.js"></script>
@@ -362,6 +383,7 @@
     messagingSenderId: "469248193289",
     appId: "1:469248193289:web:78bbd80b6a6915c03499d8"
   };
+  const allowedEmails = ["d.y.chunn@gmail.com", "jaehoonlee7777@gmail.com"];
 
   const $ = id => document.getElementById(id);
   const ids = ["income1","income2","takehome1","takehome2","existingAnnual","housePrice","cashDayoung","cashJaehoon","familyLoan","contractRate","acquisitionRate","firstHomeDeduction","brokerRate","registrationCost","interiorCost","loan","rate","years","method","stress","limit","familyMonthly","familySemi"];
@@ -376,6 +398,7 @@
   let cloudRef = null;
   let saveTimer = null;
   let applyingRemote = false;
+  let authorizedSession = false;
 
   function setSaveStatus(text, type="saved"){
     const badge = $("saveStatus");
@@ -405,7 +428,7 @@
   }
 
   function saveState(){
-    if(applyingRemote) return;
+    if(applyingRemote || !authorizedSession) return;
     const state = snapshotState();
     localStorage.setItem(LOCAL_KEY, JSON.stringify(state));
     clearTimeout(saveTimer);
@@ -439,21 +462,57 @@
     if(!firebaseConfigured()) return;
     try{
       firebase.initializeApp(firebaseConfig);
-      await firebase.auth().signInAnonymously();
-      cloudRef = firebase.database().ref("rooms/"+getRoomId());
-      cloudRef.on("value", snap=>{
-        if(snap.exists()){
-          applyState(snap.val());
-          localStorage.setItem(LOCAL_KEY, JSON.stringify(snapshotState()));
-        }else{
-          cloudRef.set(snapshotState());
+      firebase.auth().onAuthStateChanged(async user=>{
+        const email = (user && user.email || "").toLowerCase();
+        if(!user){
+          authorizedSession = false;
+          cloudRef = null;
+          $("loginOverlay").style.display = "flex";
+          $("logoutBtn").style.display = "none";
+          setSaveStatus("로그인 필요", "offline");
+          return;
         }
-        setSaveStatus("실시간 연결됨");
-      }, ()=>setSaveStatus("실시간 연결 실패", "error"));
+        if(!allowedEmails.includes(email)){
+          authorizedSession = false;
+          $("loginMessage").textContent = "허용되지 않은 계정입니다. 다른 Google 계정으로 로그인해 주세요.";
+          await firebase.auth().signOut();
+          return;
+        }
+        authorizedSession = true;
+        $("loginOverlay").style.display = "none";
+        $("logoutBtn").style.display = "inline-block";
+        $("loginMessage").textContent = "";
+        const savedState = localStorage.getItem(LOCAL_KEY);
+        if(savedState){ try{ applyState(JSON.parse(savedState)); }catch(e){} }
+        cloudRef = firebase.database().ref("rooms/"+getRoomId());
+        cloudRef.on("value", snap=>{
+          if(snap.exists()){
+            applyState(snap.val());
+            localStorage.setItem(LOCAL_KEY, JSON.stringify(snapshotState()));
+          }else{
+            cloudRef.set(snapshotState());
+          }
+          setSaveStatus("실시간 연결됨");
+        }, ()=>setSaveStatus("실시간 연결 실패", "error"));
+      });
     }catch(e){
       setSaveStatus("실시간 연결 실패", "error");
+      $("loginMessage").textContent = "로그인 연결에 실패했습니다. 잠시 후 다시 시도해 주세요.";
     }
   }
+
+  $("googleLoginBtn").addEventListener("click", async ()=>{
+    $("loginMessage").textContent = "";
+    try{
+      const provider = new firebase.auth.GoogleAuthProvider();
+      provider.setCustomParameters({prompt:"select_account"});
+      await firebase.auth().signInWithPopup(provider);
+    }catch(e){
+      $("loginMessage").textContent = e && e.code === "auth/popup-closed-by-user" ? "로그인 창이 닫혔습니다." : "Google 로그인에 실패했습니다.";
+    }
+  });
+
+  $("logoutBtn").addEventListener("click", ()=>firebase.auth().signOut().then(()=>location.reload()));
 
   const n = id => Math.max(0, parseFloat($(id).value) || 0);
   const fmt = (v, digits=0) => new Intl.NumberFormat("ko-KR", {maximumFractionDigits:digits}).format(v);
@@ -685,13 +744,7 @@
     renderFixedItems();
   });
 
-  const savedState = localStorage.getItem(LOCAL_KEY);
-  if(savedState){
-    try{ applyState(JSON.parse(savedState)); }
-    catch(e){ renderFixedItems(); }
-  }else{
-    renderFixedItems();
-  }
+  renderFixedItems();
   connectCloud();
 </script>
 </body>
